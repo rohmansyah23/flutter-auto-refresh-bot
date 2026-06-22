@@ -30,16 +30,14 @@ Ikuti langkah-langkah berikut untuk memasang atau menjalankan proyek ini dari *s
 ### Langkah-Langkah
 
 1. **Clone Repository**
-   ```bash
-   git clone [https://github.com/rohmansyah23/flutter-auto-refresh-bot.git](https://github.com/rohmansyah23/flutter-auto-refresh-bot.git)
-   cd flutter-auto-refresh-bot
-
+```bash
+git clone [https://github.com/rohmansyah23/flutter-auto-refresh-bot.git](https://github.com/rohmansyah23/flutter-auto-refresh-bot.git)
+cd flutter-auto-refresh-bot
 ```
 
 2. **Unduh Dependensi / Package**
 ```bash
 flutter pub get
-
 ```
 
 
@@ -47,10 +45,7 @@ flutter pub get
 Hubungkan perangkat Android Anda via USB Debugging atau aktifkan Android Emulator, kemudian jalankan perintah:
 ```bash
 flutter run
-
 ```
-
-
 
 ---
 
