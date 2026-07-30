@@ -73,6 +73,8 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
     loadWithOverviewMode: true,
     userAgent: "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
     preferredContentMode: UserPreferredContentMode.MOBILE,
+    safeBrowsingEnabled: false,
+    cacheMode: CacheMode.LOAD_CACHE_ELSE_NETWORK,
   );
 
   @override
@@ -317,6 +319,17 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
                     ]),
 
                     onWebViewCreated: (controller) => webViewController = controller,
+                    shouldOverrideUrlLoading: (controller, navigationAction) async {
+                      final url = navigationAction.request.url.toString();
+                      if (url.contains('google.com/search') && !url.contains('safe=')) {
+                        final separator = url.contains('?') ? '&' : '?';
+                        controller.loadUrl(
+                          urlRequest: URLRequest(url: WebUri('$url${separator}safe=off')),
+                        );
+                        return NavigationActionPolicy.CANCEL;
+                      }
+                      return NavigationActionPolicy.ALLOW;
+                    },
                     onLoadStop: (controller, url) async { _applyLayoutSistemDanZoomDinamis(); },
                     onUpdateVisitedHistory: (controller, url, isReload) async {
                       _canGoBack = await controller.canGoBack();
@@ -325,6 +338,12 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
                       setState(() {});
                     },
                     onCreateWindow: (controller, createWindowAction) async {
+                      final popupUrl = createWindowAction.request.url.toString();
+                      final isGoogleAuth = popupUrl.contains('accounts.google.com') ||
+                          popupUrl.contains('google.com/signin') ||
+                          popupUrl.contains('googleapis.com/oauth') ||
+                          popupUrl.contains('google.com/o/oauth2');
+                      if (!isGoogleAuth) return false;
                       showDialog(
                         context: context,
                         barrierDismissible: false,
