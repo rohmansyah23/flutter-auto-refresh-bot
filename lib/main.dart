@@ -1,10 +1,13 @@
 import 'dart:async';
-
+import 'dart:collection'; 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:wakelock_plus/wakelock_plus.dart'; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  WakelockPlus.enable(); 
   runApp(const MyApp());
 }
 
@@ -31,14 +34,27 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
   InAppWebViewController? webViewController;
   Timer? timer;
 
-  final TextEditingController _intervalController = TextEditingController(text: "3");
-  
+  final TextEditingController _intervalController = TextEditingController(text: "1,5");
+  final TextEditingController _widthController = TextEditingController(text: "1200");
+  final TextEditingController _urlController = TextEditingController(text: "https://www.google.com");
+  bool _canGoBack = false;
+  bool _canGoForward = false;
+
   bool _isRunning = false;
   bool _isDesktopMode = false;
   int _zoomValue = 100;
-  
-  // STATER STATUS TAMPILAN PANEL MENGAMBANG
   bool _isMenuTerbuka = false;
+
+  int _rotationIndex = 0;
+  final List<DeviceOrientation> _orientasiRotasiTipe = [
+    DeviceOrientation.portraitUp,     
+    DeviceOrientation.landscapeLeft,  
+    DeviceOrientation.portraitDown,   
+    DeviceOrientation.landscapeRight  
+  ];
+  final List<String> _teksNamaRotasi = [
+    "Normal", "Miring", "Atas-Bwh", "Miring 2"
+  ];
 
   final String pureMobileUserAgent =
       "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
@@ -47,14 +63,14 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
 
   InAppWebViewSettings settings = InAppWebViewSettings(
     javaScriptEnabled: true,
-    supportMultipleWindows: true, // Dukungan Tembus Login Pop-UP Aktif 
+    supportMultipleWindows: true,
     javaScriptCanOpenWindowsAutomatically: true,
     domStorageEnabled: true,
     supportZoom: true,
-    builtInZoomControls: true, 
+    builtInZoomControls: true,
     displayZoomControls: false,
-    useWideViewPort: true, // Untuk Dimensi Monitor Paksa Aktif (Biar Kolom nya jadi berjejer 3)
-    loadWithOverviewMode: true, 
+    useWideViewPort: true,
+    loadWithOverviewMode: true,
     userAgent: "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
     preferredContentMode: UserPreferredContentMode.MOBILE,
   );
@@ -63,21 +79,24 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
   void dispose() {
     timer?.cancel();
     _intervalController.dispose();
+    _widthController.dispose();
+    _urlController.dispose();
+    WakelockPlus.disable(); 
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp, 
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft, 
+      DeviceOrientation.landscapeRight,
+    ]);
     super.dispose();
   }
-
-  // --- KUMPULAN LOGIKA PERINTAH TETAP TERJAGA KINERJANYA ---
 
   void _startAutoRefresh() {
     int intervalSeconds = int.tryParse(_intervalController.text) ?? 3;
     if (intervalSeconds <= 0) intervalSeconds = 2;
     setState(() => _isRunning = true);
-
     timer?.cancel();
-    timer = Timer.periodic(
-      Duration(seconds: intervalSeconds),
-      (_) { webViewController?.reload(); },
-    );
+    timer = Timer.periodic( Duration(seconds: intervalSeconds), (_) { webViewController?.reload(); } );
   }
 
   void _stopAutoRefresh() {
@@ -85,260 +104,518 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
     setState(() => _isRunning = false);
   }
 
-  void _toggleDesktopMode(bool? value) async {
-    if (value == null) return;
+  void _toggleDesktopMode(bool value) async {
     setState(() => _isDesktopMode = value);
-
     var webSettings = await webViewController?.getSettings();
     if (webSettings != null) {
       webSettings.userAgent = _isDesktopMode ? pureDesktopUserAgent : pureMobileUserAgent;
       webSettings.preferredContentMode = _isDesktopMode ? UserPreferredContentMode.DESKTOP : UserPreferredContentMode.MOBILE;
       await webViewController?.setSettings(settings: webSettings);
     }
-    webViewController?.reload(); 
+    webViewController?.reload();
+    _applyLayoutSistemDanZoomDinamis();
+  }
+
+  void _goToUrl(String url) {
+    if (url.isEmpty) return;
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      url = "https://$url";
+    }
+    webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    FocusScope.of(context).unfocus();
+  }
+
+  void _goBack() {
+    webViewController?.goBack();
+  }
+
+  void _goForward() {
+    webViewController?.goForward();
+  }
+
+  void _refresh() {
+    webViewController?.reload();
+  }
+
+  void _gantiUrutanRotasiSistemLayar() {
+    setState(() { _rotationIndex = (_rotationIndex + 1) % 4; });
+    SystemChrome.setPreferredOrientations([ _orientasiRotasiTipe[_rotationIndex] ]);
+    Future.delayed(const Duration(milliseconds: 350), () => _applyLayoutSistemDanZoomDinamis());
   }
 
   void _changeZoomLevel(int pertambahanValue) {
     setState(() {
       _zoomValue += pertambahanValue;
-      if (_zoomValue < 20) _zoomValue = 20; 
-      if (_zoomValue > 300) _zoomValue = 300; 
+      if (_zoomValue < 20) _zoomValue = 20;
+      if (_zoomValue > 300) _zoomValue = 300;
     });
     _applyLayoutSistemDanZoomDinamis();
   }
 
+  // === 🔥 ULTIMATE WEB ANTI-CRASH & MODAL BLOCKER === 
+  final String scriptDewaAntiBerkedipDanAmanBagiWeb = """
+      (function(){
+        
+        // CSS GHOSTING: Mencegah Kedip Saat Web Muat Tiba Tiba
+        var antiFlickerCssSiluman = document.createElement('style');
+        antiFlickerCssSiluman.type = 'text/css';
+        antiFlickerCssSiluman.innerHTML = `
+             html[data-nuke-target="aktif"] aside,
+             html[data-nuke-target="aktif"] nav,
+             html[data-nuke-target="aktif"] header,
+             html[data-nuke-target="aktif"] [id*="sidebar"],
+             html[data-nuke-target="aktif"] [class*="bottom-menu"],
+             html[data-nuke-target="aktif"] div.fixed.inset-0.z-50[class*="backdrop-blur"] {
+                  display: none !important; 
+                  pointer-events: none !important;
+             }
+        `;
+        function taruhPenangkalStyleAwal() {
+            if (document.head || document.documentElement) {
+                (document.head || document.documentElement).appendChild(antiFlickerCssSiluman);
+            } else { setTimeout(taruhPenangkalStyleAwal, 2); }
+        }
+        taruhPenangkalStyleAwal();
+
+        // MOTOR PENYUSUP ENGINE / Fps FRAME CATCHER !! 
+        function peredamModeAman() {
+            var urlLengkap = window.location.href.toLowerCase();
+            var domainBuzzcuan = urlLengkap.includes('buzzcuan.id') || urlLengkap.includes('buzzcuan.com');
+            var sedangDidalamDashboardTask = domainBuzzcuan && urlLengkap.includes('dashboard/tasks');
+            if(sedangDidalamDashboardTask){
+                 
+                 document.documentElement.setAttribute('data-nuke-target', 'aktif');
+                 
+                 // ====== 1. SISTEM ANTIMATTER MODAL OVERLAY KHUSUS =====
+                 // Mendeteksi Keberadaan Overlay <div class="fixed inset-0 bg-slate... dsbnya"> secara aman !!
+                 document.querySelectorAll('div.fixed.inset-0.z-50').forEach(function(modalHantu) {
+                     var atributClassOverlay = modalHantu.getAttribute('class') || '';
+                     if (atributClassOverlay.includes('bg-slate-') || atributClassOverlay.includes('backdrop-blur')) {
+                         
+                         // Dihiden Tanpa meRemove (Menipu Crash pada sistem SPA website !) 
+                         modalHantu.style.setProperty('display', 'none', 'important');
+                         modalHantu.style.setProperty('opacity', '0', 'important');
+                         modalHantu.style.setProperty('visibility', 'hidden', 'important');
+                         modalHantu.style.setProperty('pointer-events', 'none', 'important'); 
+                         
+                         // Penting! Atasi freeze (Stuck Gabisa Dihandle Geser Ke Bawah ) 
+                         document.body.style.setProperty('overflow', 'auto', 'important');
+                         document.body.style.setProperty('pointer-events', 'auto', 'important');
+                     }
+                 });
+
+
+                 // ====== 2. EKSEKUTOR TITLE, SUB TITLE TEXT TARGETS !! ====
+                 var keywordDilarang = ['REWARD MARKETPLACE', 'BUZZCUAN TASKS', 'PILIH TUGAS', 'MENAMPILKAN 1 -'];
+                 
+                 document.querySelectorAll('main p, main h1, main h2, main span, main h3').forEach(function(el) {
+                     var tekAsliHurufBsr = (el.innerText || "").toUpperCase();
+                     for(var k=0; k < keywordDilarang.length; k++) {
+                        if (tekAsliHurufBsr.includes(keywordDilarang[k])) {
+                            // Sembunyikan diam2 dr layar secara Absolut (No physical render !)
+                            el.style.setProperty('display', 'none', 'important'); 
+                            el.style.setProperty('visibility', 'hidden', 'important'); 
+                            el.style.setProperty('height', '0px', 'important');
+                            el.style.setProperty('margin', '0px', 'important');
+                            el.style.setProperty('padding', '0px', 'important');
+                        }
+                     }
+                 });
+
+
+                 // ===== 3. TUTUP MENU OPTION FILTER / PAGES ====  
+                 document.querySelectorAll('main .card').forEach(function(kartuObjk) {
+                     var textKelasAttrKotor = kartuObjk.getAttribute('class') || '';
+                     
+                     // Pastikan Jangan Sampai Elemen Card Target asli ikut Kesapu : 
+                     if( !kartuObjk.querySelector('.task-card') && !textKelasAttrKotor.includes('task-card') ) {
+                         if (textKelasAttrKotor.includes('p-3.5') || 
+                             textKelasAttrKotor.includes('p-4') || 
+                             (kartuObjk.innerText && kartuObjk.innerText.includes('Tampilkan'))) {
+                             kartuObjk.style.setProperty('display', 'none', 'important');
+                             kartuObjk.style.setProperty('padding', '0px', 'important'); 
+                             kartuObjk.style.setProperty('margin', '0px', 'important'); 
+                             kartuObjk.style.setProperty('height', '0px', 'important'); 
+                             kartuObjk.style.setProperty('overflow', 'hidden', 'important'); 
+                         }
+                     }
+                 });
+                 
+                 // ====== 4. AUTOPILOT PEMBENTUK POSTUR LURUS DARI PARENT SAMPAI MENTOK BAWAH =====
+                 var bksPenahanParentMain = document.querySelector('main');
+                 while (bksPenahanParentMain && bksPenahanParentMain.tagName !== 'BODY') {
+                     // Paksa ratakan pinggiran Tailwind
+                     bksPenahanParentMain.style.setProperty('padding', '0px', 'important');
+                     bksPenahanParentMain.style.setProperty('margin', '0px', 'important');
+                     
+                     // Paksa rata center tanpa sisa porsi flex col ! 
+                     bksPenahanParentMain.style.setProperty('width', '100%', 'important');
+                     bksPenahanParentMain.style.setProperty('display', 'flex', 'important');
+                     bksPenahanParentMain.style.setProperty('flex-direction', 'column', 'important');
+                     bksPenahanParentMain.style.setProperty('align-items', 'center', 'important');
+                     bksPenahanParentMain.style.setProperty('max-width', '100vw', 'important');
+                     
+                     bksPenahanParentMain = bksPenahanParentMain.parentElement;
+                 }
+
+                 // Kuncian pada area barisan Container Anak Task-Card-nya biar ditengah Monitor presisi  
+                 document.querySelectorAll('.grid[class*="gap"]').forEach(function(gGr1id) {
+                     gGr1id.style.setProperty('width', '100%', 'important');
+                     gGr1id.style.setProperty('max-width', '1200px', 'important'); 
+                     gGr1id.style.setProperty('justify-content', 'center', 'important');
+                     gGr1id.style.setProperty('align-items', 'center', 'important');
+                     gGr1id.style.setProperty('margin', '0 auto', 'important');
+                 });
+
+            } else {
+                 document.documentElement.removeAttribute('data-nuke-target');
+            }
+
+            requestAnimationFrame(peredamModeAman); 
+        }
+        requestAnimationFrame(peredamModeAman);
+
+      })();
+  """;
+
   void _applyLayoutSistemDanZoomDinamis() {
+    String lebarYgDisetelFormText = _widthController.text.trim();
+    if(lebarYgDisetelFormText.isEmpty) lebarYgDisetelFormText = "1024";
+
     String paksakanLebarScreenCF = _isDesktopMode
-        ? "try{document.querySelector('meta[name=\"viewport\"]').setAttribute('content', 'width=1200');}catch(e){}" 
-        : "try{document.querySelector('meta[name=\"viewport\"]').setAttribute('content', 'width=device-width, initial-scale=1');}catch(e){}"; 
+        ? "try{document.querySelector('meta[name=\"viewport\"]').setAttribute('content', 'width=$lebarYgDisetelFormText');}catch(e){}"
+        : "try{document.querySelector('meta[name=\"viewport\"]').setAttribute('content', 'width=device-width, initial-scale=1');}catch(e){}";
 
     webViewController?.evaluateJavascript(source: """
        $paksakanLebarScreenCF 
-       document.body.style.zoom = '${_zoomValue}%'; 
+       document.body.style.zoom = '$_zoomValue%'; 
     """);
   }
 
-
-  // ============== PEMBANGUNAN HALAMAN LAYAR 100% LAYOUT WEB BARU =================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.blueGrey.shade50,
-      
-      // Halaman Dibagi berlapis (Stack). Web ada dibagian Bawah (Back), Tombol Mengambang & Box ada di paling Depan Lapisannya
+      backgroundColor: Colors.blueGrey.shade900, 
+      resizeToAvoidBottomInset: false, 
+
       body: SafeArea(
-        child: Stack(
+        child: Column(
           children: [
-            
-            // ================== LAYAP 1 (Lapis Utama Paling Belakang - Tampilan Situs Cuan Penuh Tanpa Batas 100%) ===================
-            InAppWebView(
-              initialUrlRequest: URLRequest(url: WebUri("https://buzzcuan.id")), 
-              initialSettings: settings,
-              onWebViewCreated: (controller) {
-                webViewController = controller;
-              },
-              onLoadStop: (controller, url) async {
-                _applyLayoutSistemDanZoomDinamis();
-              },
-              
-              // ============ (Google Pop UP Layar Sentuh Sistem Terapkan Langsung Ke-Mode Lapis Melayang - Tidak di ubah Sama!) ======
-              onCreateWindow: (controller, createWindowAction) async {
-                showDialog(
-                  context: context,
-                  barrierDismissible: false, 
-                  builder: (context) {
-                    return AlertDialog(
-                      contentPadding: EdgeInsets.zero,
-                      backgroundColor: Colors.white,
-                      clipBehavior: Clip.hardEdge,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      content: SizedBox(
-                        width: MediaQuery.of(context).size.width * 0.95, 
-                        height: MediaQuery.of(context).size.height * 0.75,
-                        child: Column(
-                          children: [
-                            Container(
-                              color: Colors.blue.shade600,
-                              padding: const EdgeInsets.symmetric(horizontal: 10),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            _buildAddressBar(),
+            Expanded(
+              child: Stack(
+                children: [
+                  InAppWebView(
+                    initialUrlRequest: URLRequest(url: WebUri("https://www.google.com")),
+                    initialSettings: settings,
+                    
+                    initialUserScripts: UnmodifiableListView<UserScript>([
+                      UserScript(
+                         source: scriptDewaAntiBerkedipDanAmanBagiWeb, 
+                         injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START 
+                      ),
+                    ]),
+
+                    onWebViewCreated: (controller) => webViewController = controller,
+                    onLoadStop: (controller, url) async { _applyLayoutSistemDanZoomDinamis(); },
+                    onUpdateVisitedHistory: (controller, url, isReload) async {
+                      _canGoBack = await controller.canGoBack();
+                      _canGoForward = await controller.canGoForward();
+                      _urlController.text = url.toString();
+                      setState(() {});
+                    },
+                    onCreateWindow: (controller, createWindowAction) async {
+                      showDialog(
+                        context: context,
+                        barrierDismissible: false,
+                        builder: (context) {
+                          return AlertDialog(
+                            contentPadding: EdgeInsets.zero,
+                            backgroundColor: Colors.white,
+                            clipBehavior: Clip.hardEdge,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            content: SizedBox(
+                              width: MediaQuery.of(context).size.width * 0.95,
+                              height: MediaQuery.of(context).size.height * 0.75,
+                              child: Column(
                                 children: [
-                                  const Text(" 🌐  System Sign In / Login O-Auth...", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
-                                  IconButton(
-                                    icon: const Icon(Icons.close_rounded, color: Colors.white),
-                                    onPressed: () {
-                                      Navigator.of(context).pop(); 
-                                    },
+                                  Container(
+                                    color: Colors.blue.shade600,
+                                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        const Text(" 🌐 Secure Auth...", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                                        IconButton(
+                                          icon: const Icon(Icons.close_rounded, color: Colors.white),
+                                          onPressed: () => Navigator.of(context).pop(),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: InAppWebView(
+                                      windowId: createWindowAction.windowId,
+                                      initialSettings: InAppWebViewSettings(userAgent: settings.userAgent),
+                                      onCloseWindow: (childController) async {
+                                        if(Navigator.canPop(context)) Navigator.of(context).pop();
+                                      },
+                                    ),
                                   ),
                                 ],
                               ),
                             ),
-                            Expanded(
-                              child: InAppWebView(
-                                windowId: createWindowAction.windowId, 
-                                initialSettings: InAppWebViewSettings(userAgent: settings.userAgent), 
-                                onCloseWindow: (childController) async {
-                                  if(Navigator.canPop(context)) {
-                                     Navigator.of(context).pop(); 
-                                  }
-                                },
+                          );
+                        },
+                      );
+                      return true;
+                    },
+                  ),
+
+                  if (_isMenuTerbuka)
+                    Positioned(
+                      bottom: 80,
+                      right: 16,
+                      left: 16,
+                      child: AnimatedPadding(
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOutCubic, 
+                        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+                        child: Container(
+                          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.75),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 5))],
+                          ),
+                          child: SingleChildScrollView(
+                            physics: const ClampingScrollPhysics(),
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Center( child: Container( width: 50, height: 4, margin: const EdgeInsets.only(bottom: 15), decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)) ) ),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.blue.shade100,
+                                          foregroundColor: Colors.blue.shade900,
+                                          elevation: 0,
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))
+                                        ),
+                                        icon: Icon( (_rotationIndex == 1 || _rotationIndex == 3) ? Icons.screen_lock_landscape : Icons.screen_lock_portrait, size: 20 ),
+                                        label: Text(_teksNamaRotasi[_rotationIndex], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                                        onPressed: _gantiUrutanRotasiSistemLayar, 
+                                      ),
+                    
+                                      Container(
+                                        height: 38,
+                                        decoration: BoxDecoration( color: Colors.grey.shade50, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200) ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton( padding: EdgeInsets.zero, icon: const Icon(Icons.remove, size: 18), color: Colors.black87, onPressed: () => _changeZoomLevel(-10) ),
+                                            Container( width: 45, alignment: Alignment.center, child: Text("$_zoomValue%", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)) ),
+                                            IconButton( padding: EdgeInsets.zero, icon: const Icon(Icons.add, size: 18), color: Colors.black87, onPressed: () => _changeZoomLevel(10) ),
+                                          ],
+                                        ),
+                                      )
+                                    ],
+                                  ),
+                                  
+                                  const SizedBox(height: 12),
+                                  Container(
+                                    decoration: BoxDecoration( borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.blueGrey.shade100) ),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: Material(
+                                      color: Colors.blueGrey.shade50,
+                                      child: Column(
+                                        children: [
+                                          SwitchListTile(
+                                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                                            visualDensity: VisualDensity.compact,
+                                            activeThumbColor: Colors.blue, 
+                                            activeTrackColor: Colors.blue.withValues(alpha: 0.3),
+                                            title: const Text("PC/Tablet Dimensi View", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.blueGrey)),
+                                            value: _isDesktopMode,
+                                            onChanged: (bool onUpdateTgl) => _toggleDesktopMode(onUpdateTgl),
+                                          ),
+                                          
+                                          if(_isDesktopMode)
+                                            Padding(
+                                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                                              child: Row(
+                                                children: [
+                                                  const Text("Atur Lebar Px Area:", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
+                                                  const SizedBox(width: 8),
+                                                  Expanded(
+                                                    child: SizedBox(
+                                                      height: 38,
+                                                      child: TextField(
+                                                        controller: _widthController,
+                                                        keyboardType: TextInputType.number,
+                                                        textAlign: TextAlign.center,
+                                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                                        decoration: const InputDecoration(
+                                                          hintText: "Misal 800",
+                                                          contentPadding: EdgeInsets.zero,
+                                                          suffixText: "Px   ", suffixStyle: TextStyle(fontSize: 11, color: Colors.grey),
+                                                          fillColor: Colors.white, filled: true,
+                                                          border: OutlineInputBorder()
+                                                        ),
+                                                        onSubmitted: (_) { FocusScope.of(context).unfocus(); _applyLayoutSistemDanZoomDinamis(); },
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            )
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  
+                                  const SizedBox(height: 12),
+                                  const Divider(height: 1, thickness: 1, color: Colors.black12), 
+                                  const SizedBox(height: 12),
+                    
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        flex: 1,
+                                        child: TextField(
+                                          controller: _intervalController,
+                                          keyboardType: TextInputType.number,
+                                          enabled: !_isRunning,
+                                          style: const TextStyle(fontWeight: FontWeight.bold),
+                                          decoration: InputDecoration(
+                                            labelText: "⏱️ Interval(s)",
+                                            labelStyle: const TextStyle(fontSize: 11),
+                                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                            isDense: true,
+                                            filled: true, fillColor: _isRunning ? Colors.grey.shade200 : Colors.green.shade50,
+                                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Colors.green.shade300)),
+                                            disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Colors.grey.shade300)),
+                                            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Colors.green.shade600, width: 2)),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        flex: 1,
+                                        child: ElevatedButton(
+                                          onPressed: _isRunning ? null : () { setState(() => _isMenuTerbuka = false); _startAutoRefresh(); },
+                                          style: ElevatedButton.styleFrom(
+                                              backgroundColor: Colors.green.shade600, foregroundColor: Colors.white,
+                                              elevation: 0, padding: const EdgeInsets.symmetric(vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                                          child: const Text("▶ RUN!", style: TextStyle(fontWeight: FontWeight.w900)),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      SizedBox(
+                                        width: 48,
+                                        child: ElevatedButton(
+                                          onPressed: _isRunning ? _stopAutoRefresh : null,
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: Colors.red.shade500, foregroundColor: Colors.white,
+                                            elevation: 0, padding: EdgeInsets.zero, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))
+                                          ),
+                                          child: const Icon(Icons.stop_rounded, size: 26),
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                ],
                               ),
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                    );
-                  },
-                );
-                return true; 
-              },
-            ),
-
-            
-            // ================== LAYAP 2 ( Kotak Control Kendali Mengambang yg Dipanggil Tombol Garis-Tiga !! ) ================== 
-            // Posisi dibuat interaktif kalau Form keyboard ketikan detik terbuka, Menu terbang sedikit agar terhindar (TIdak tertumpuk)
-            if (_isMenuTerbuka)
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 250),
-                bottom: 80 + MediaQuery.of(context).viewInsets.bottom, 
-                right: 16,
-                left: 16,
-                child: Material(
-                  elevation: 12, // Mempunyai Bayangan
-                  color: Colors.white.withOpacity(0.96), //  sedikit Transparan Estetik (ala Kaca putih susu) !
-                  borderRadius: BorderRadius.circular(20),
-                  clipBehavior: Clip.antiAlias,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        
-                        // Garis Dekorasi Kotaknya Biar Manis
-                        Container( width: 40, height: 4, margin: const EdgeInsets.only(bottom: 12), decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(10)) ),
-                        
-                        // BARIS ATAS = CEKLIS DEKSTOP DAN TOMBOL ZOOM 
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                             // -- CEKLIS DESKTOP --
-                             Container(
-                               decoration: BoxDecoration( color: Colors.blue.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
-                               padding: const EdgeInsets.symmetric(horizontal: 4),
-                               child: Row(
-                                 children: [
-                                   Checkbox(
-                                      value: _isDesktopMode,
-                                      onChanged: _toggleDesktopMode,
-                                      activeColor: Colors.blue,
-                                    ),
-                                   const Text("Desktop Web", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.blue)),
-                                   const SizedBox(width: 8)
-                                 ],
-                               ),
-                             ),
-
-                            // -- MIN / PLUS (KOTAK KECIL ZOOOM -- )
-                            Container(
-                              height: 35,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: Colors.grey.shade300)
-                              ),
-                              child: Row(
-                                children: [
-                                  IconButton(
-                                    padding: EdgeInsets.zero,
-                                    icon: const Icon(Icons.remove, size: 20, color: Colors.black87),
-                                    onPressed: () => _changeZoomLevel(-10),
-                                  ),
-                                  Text("$_zoomValue%", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                                  IconButton(
-                                    padding: EdgeInsets.zero,
-                                    icon: const Icon(Icons.add, size: 20, color: Colors.black87),
-                                    onPressed: () => _changeZoomLevel(10),
-                                  ),
-                                ],
-                              ),
-                            )
-
-                          ],
-                        ),
-                        
-                        const SizedBox(height: 12),
-
-                        // BARIS BAWAH = [ ISIAN ANGKA DETIK | START | STOP]  🔥🚀
-                        Row(
-                          children: [
-                            // - Ketikan Waktu
-                            Expanded(
-                              child: TextField(
-                                controller: _intervalController,
-                                keyboardType: TextInputType.number,
-                                enabled: !_isRunning,
-                                decoration: InputDecoration(
-                                  labelText: "Jeda/Detik",
-                                  isDense: true, filled: true, fillColor: Colors.grey.shade100,
-                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-
-                            // - Tombol RUN hijau Menyala
-                            ElevatedButton.icon(
-                              onPressed: _isRunning ? null : () { 
-                                  // Tutup/Bakar Kotak Menu biar Leluasa ngelihat Cuannya berlimpah Otomatis
-                                  setState(() => _isMenuTerbuka = false); 
-                                  _startAutoRefresh(); 
-                              },
-                              style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade600, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 14)),
-                              icon: const Icon(Icons.play_arrow_rounded, size: 16),
-                              label: const Text("RUN!"),
-                            ),
-                            const SizedBox(width: 4),
-
-                            // - Tombol Stop
-                            ElevatedButton(
-                              onPressed: _isRunning ? _stopAutoRefresh : null,
-                              style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade400, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 14)),
-                              child: const Icon(Icons.stop_rounded, size: 18),
-                            ),
-                          ],
-                        )
-
-                      ],
                     ),
-                  ),
-                ),
+                ],
               ),
-
+            ),
           ],
         ),
       ),
-
-      // ========================== MENU GARIS 3 ( HAMBURGER MENGAMBANG DI POJOK ! )  ===========================
-      // Indikator Warna Garis 3 berubah Jadi Hijau Nyala kalau program Refresh Bot kamu lagi Bekerja 
       floatingActionButton: FloatingActionButton(
         elevation: 8,
         backgroundColor: _isRunning ? Colors.green.shade500 : Colors.blue.shade700,
-        onPressed: () {
-          // Ketika ditekan Titik nya Memunculkan  / Menyembuyikan box ! 
-          setState(() { _isMenuTerbuka = !_isMenuTerbuka; });
-        },
+        onPressed: () { setState(() { _isMenuTerbuka = !_isMenuTerbuka; }); },
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 300),
-          // Bila di Pencet terbuka maka ICON Mengambang Menjadi Icon tanda SILANG [X] , kalo Di silang kembali Ke GARIS TIGA 
-          child: Icon(
-            _isMenuTerbuka ? Icons.close : Icons.menu,
-            key: ValueKey(_isMenuTerbuka),
-            color: Colors.white,
-          ),
+          child: Icon(_isMenuTerbuka ? Icons.close : Icons.tune_rounded, key: ValueKey(_isMenuTerbuka), color: Colors.white),
         ),
       ),
+    );
+  }
 
-
+  Widget _buildAddressBar() {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.arrow_back_ios, size: 16),
+            onPressed: _canGoBack ? _goBack : null,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36),
+            color: Colors.blueGrey.shade700,
+          ),
+          IconButton(
+            icon: const Icon(Icons.arrow_forward_ios, size: 16),
+            onPressed: _canGoForward ? _goForward : null,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36),
+            color: Colors.blueGrey.shade700,
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh, size: 20),
+            onPressed: _refresh,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36),
+            color: Colors.blueGrey.shade700,
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: TextField(
+              controller: _urlController,
+              keyboardType: TextInputType.url,
+              textInputAction: TextInputAction.go,
+              style: const TextStyle(fontSize: 13, color: Colors.black87),
+              decoration: InputDecoration(
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                filled: true,
+                fillColor: Colors.grey.shade100,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  borderSide: BorderSide.none,
+                ),
+                hintText: "Cari atau masukkan URL",
+                hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+              ),
+              onSubmitted: (value) => _goToUrl(value),
+            ),
+          ),
+          const SizedBox(width: 4),
+          TextButton(
+            onPressed: () => _goToUrl(_urlController.text),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              foregroundColor: Colors.blue.shade700,
+            ),
+            child: const Text("Go", style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
     );
   }
 }
