@@ -438,7 +438,7 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
                                           SwitchListTile(
                                             contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                                             visualDensity: VisualDensity.compact,
-                                            activeThumbColor: Colors.blue, 
+                                            activeColor: Colors.blue, 
                                             activeTrackColor: Colors.blue.withValues(alpha: 0.3),
                                             title: const Text("PC/Tablet Dimensi View", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.blueGrey)),
                                             value: _isDesktopMode,
