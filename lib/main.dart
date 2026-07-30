@@ -3,28 +3,41 @@ import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:wakelock_plus/wakelock_plus.dart'; 
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  final savedUrl = prefs.getString('lastUrl') ?? 'https://duckduckgo.com';
   WakelockPlus.enable(); 
-  runApp(const MyApp());
+  runApp(MyApp(initialUrl: savedUrl));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  final String initialUrl;
+  const MyApp({super.key, required this.initialUrl});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: AutoRefreshPage(),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: Colors.blue,
+        scaffoldBackgroundColor: Colors.white,
+        bottomSheetTheme: const BottomSheetThemeData(
+          showDragHandle: false,
+        ),
+      ),
+      home: AutoRefreshPage(initialUrl: initialUrl),
     );
   }
 }
 
 class AutoRefreshPage extends StatefulWidget {
-  const AutoRefreshPage({super.key});
+  final String initialUrl;
+  const AutoRefreshPage({super.key, required this.initialUrl});
 
   @override
   State<AutoRefreshPage> createState() => _AutoRefreshPageState();
@@ -36,14 +49,16 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
 
   final TextEditingController _intervalController = TextEditingController(text: "1,5");
   final TextEditingController _widthController = TextEditingController(text: "1200");
-  final TextEditingController _urlController = TextEditingController(text: "https://www.google.com");
+  final TextEditingController _urlController = TextEditingController();
   bool _canGoBack = false;
   bool _canGoForward = false;
+  bool _isLoading = false;
 
   bool _isRunning = false;
   bool _isDesktopMode = false;
   int _zoomValue = 100;
   bool _isMenuTerbuka = false;
+  void Function(VoidCallback)? _refreshSheet;
 
   int _rotationIndex = 0;
   final List<DeviceOrientation> _orientasiRotasiTipe = [
@@ -52,8 +67,11 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
     DeviceOrientation.portraitDown,   
     DeviceOrientation.landscapeRight  
   ];
-  final List<String> _teksNamaRotasi = [
-    "Normal", "Miring", "Atas-Bwh", "Miring 2"
+  final List<IconData> _iconOri = [
+    Icons.screen_lock_portrait,
+    Icons.screen_lock_landscape,
+    Icons.screen_lock_portrait,
+    Icons.screen_lock_landscape,
   ];
 
   final String pureMobileUserAgent =
@@ -74,8 +92,13 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
     userAgent: "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
     preferredContentMode: UserPreferredContentMode.MOBILE,
     safeBrowsingEnabled: false,
-    cacheMode: CacheMode.LOAD_CACHE_ELSE_NETWORK,
   );
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController.text = widget.initialUrl;
+  }
 
   @override
   void dispose() {
@@ -108,6 +131,7 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
 
   void _toggleDesktopMode(bool value) async {
     setState(() => _isDesktopMode = value);
+    _refreshSheet?.call(() {});
     var webSettings = await webViewController?.getSettings();
     if (webSettings != null) {
       webSettings.userAgent = _isDesktopMode ? pureDesktopUserAgent : pureMobileUserAgent;
@@ -118,12 +142,26 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
     _applyLayoutSistemDanZoomDinamis();
   }
 
-  void _goToUrl(String url) {
-    if (url.isEmpty) return;
-    if (!url.startsWith("http://") && !url.startsWith("https://")) {
-      url = "https://$url";
+  void _goToUrl(String input) {
+    if (input.isEmpty) return;
+    final trimmed = input.trim();
+    final isLikelyUrl = trimmed.contains('.') &&
+        !trimmed.contains(' ') &&
+        (trimmed.startsWith('http://') ||
+         trimmed.startsWith('https://') ||
+         RegExp(r'^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}').hasMatch(trimmed));
+    if (isLikelyUrl) {
+      String url = trimmed;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://$url';
+      }
+      webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    } else {
+      final query = Uri.encodeQueryComponent(trimmed);
+      webViewController?.loadUrl(
+        urlRequest: URLRequest(url: WebUri('https://duckduckgo.com/?q=$query&kp=-2')),
+      );
     }
-    webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
     FocusScope.of(context).unfocus();
   }
 
@@ -139,9 +177,12 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
     webViewController?.reload();
   }
 
-  void _gantiUrutanRotasiSistemLayar() {
-    setState(() { _rotationIndex = (_rotationIndex + 1) % 4; });
-    SystemChrome.setPreferredOrientations([ _orientasiRotasiTipe[_rotationIndex] ]);
+  void _setOrientation(int index) {
+    setState(() { _rotationIndex = index; });
+    _refreshSheet?.call(() {});
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values).then((_) {
+      SystemChrome.setPreferredOrientations([_orientasiRotasiTipe[index]]);
+    });
     Future.delayed(const Duration(milliseconds: 350), () => _applyLayoutSistemDanZoomDinamis());
   }
 
@@ -151,7 +192,283 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
       if (_zoomValue < 20) _zoomValue = 20;
       if (_zoomValue > 300) _zoomValue = 300;
     });
+    _refreshSheet?.call(() {});
     _applyLayoutSistemDanZoomDinamis();
+  }
+
+  void _showSettingsSheet() {
+    if (_isMenuTerbuka) return;
+    setState(() => _isMenuTerbuka = true);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          _refreshSheet = setSheetState;
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              child: _buildSettingsPanel(),
+            ),
+          );
+        },
+      ),
+    ).whenComplete(() {
+      _refreshSheet = null;
+      if (mounted) setState(() => _isMenuTerbuka = false);
+    });
+  }
+
+  Widget _buildSettingsPanel() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Center(
+          child: Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(bottom: 16),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade300,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        ),
+        _buildOrientationSection(),
+        const SizedBox(height: 16),
+        _buildDesktopSection(),
+        const SizedBox(height: 16),
+        _buildZoomSection(),
+        const SizedBox(height: 16),
+        const Divider(height: 1),
+        const SizedBox(height: 16),
+        _buildAutoRefreshSection(),
+      ],
+    );
+  }
+
+  Widget _buildOrientationSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Orientasi",
+          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Colors.black87),
+        ),
+        const SizedBox(height: 10),
+        Center(
+          child: ToggleButtons(
+            isSelected: List.generate(4, (i) => _rotationIndex == i),
+            onPressed: (i) => _setOrientation(i),
+            borderRadius: BorderRadius.circular(8),
+            borderWidth: 1.5,
+            borderColor: Colors.grey.shade400,
+            selectedBorderColor: Colors.blue.shade400,
+            fillColor: Colors.blue.shade100,
+            color: Colors.grey.shade700,
+            selectedColor: Colors.blue.shade900,
+            constraints: const BoxConstraints(minWidth: 52, minHeight: 52),
+            children: List.generate(4, (i) => Icon(_iconOri[i], size: 22)),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDesktopSection() {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade400),
+      ),
+      child: Column(
+        children: [
+          SwitchListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+            visualDensity: VisualDensity.compact,
+            activeColor: Colors.blue,
+            activeTrackColor: Colors.blue.withValues(alpha: 0.3),
+            title: const Text(
+              "PC / Tablet View",
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+            value: _isDesktopMode,
+            onChanged: (v) => _toggleDesktopMode(v),
+          ),
+          if (_isDesktopMode)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  const Text("Lebar:", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Colors.grey)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: SizedBox(
+                      height: 36,
+                      child: TextField(
+                        controller: _widthController,
+                        keyboardType: TextInputType.number,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        decoration: InputDecoration(
+                          hintText: "Misal 800",
+                          contentPadding: EdgeInsets.zero,
+                          suffixText: "Px",
+                          suffixStyle: const TextStyle(fontSize: 11, color: Colors.grey),
+                          filled: true,
+                          fillColor: Colors.white,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onSubmitted: (_) { FocusScope.of(context).unfocus(); _applyLayoutSistemDanZoomDinamis(); },
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildZoomSection() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        const Text(
+          "Zoom",
+          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Colors.black87),
+        ),
+        Container(
+          height: 36,
+          decoration: BoxDecoration(
+            color: Colors.grey.shade50,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.grey.shade400),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                icon: const Icon(Icons.remove, size: 18),
+                color: Colors.black87,
+                onPressed: () => _changeZoomLevel(-10),
+              ),
+              SizedBox(
+                width: 45,
+                child: Text(
+                  "$_zoomValue%",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+              IconButton(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                icon: const Icon(Icons.add, size: 18),
+                color: Colors.black87,
+                onPressed: () => _changeZoomLevel(10),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAutoRefreshSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Auto Refresh",
+          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Colors.black87),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              flex: 1,
+              child: TextField(
+                controller: _intervalController,
+                keyboardType: TextInputType.number,
+                enabled: !_isRunning,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+                decoration: InputDecoration(
+                  labelText: "Interval (detik)",
+                  labelStyle: const TextStyle(fontSize: 12),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  isDense: true,
+                  filled: true,
+                  fillColor: _isRunning ? Colors.grey.shade200 : Colors.green.shade50,
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.green.shade300),
+                  ),
+                  disabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.grey.shade300),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.green.shade600, width: 2),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 1,
+              child: ElevatedButton(
+                onPressed: _isRunning
+                    ? null
+                    : () {
+                        _startAutoRefresh();
+                        Navigator.maybePop(context);
+                      },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green.shade600,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                child: const Text("RUN", style: TextStyle(fontWeight: FontWeight.w900)),
+              ),
+            ),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 48,
+              child: ElevatedButton(
+                onPressed: _isRunning
+                    ? () {
+                        _stopAutoRefresh();
+                        Navigator.maybePop(context);
+                      }
+                    : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red.shade500,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                child: const Icon(Icons.stop_rounded, size: 26),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
   // === 🔥 ULTIMATE WEB ANTI-CRASH & MODAL BLOCKER === 
@@ -296,7 +613,20 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return WillPopScope(
+      onWillPop: () async {
+        if (webViewController == null) return true;
+        final canGoBack = await webViewController!.canGoBack();
+        if (canGoBack) {
+          await webViewController!.goBack();
+          _canGoBack = await webViewController!.canGoBack();
+          _canGoForward = await webViewController!.canGoForward();
+          setState(() {});
+          return false;
+        }
+        return true;
+      },
+      child: Scaffold(
       backgroundColor: Colors.blueGrey.shade900, 
       resizeToAvoidBottomInset: false, 
 
@@ -308,7 +638,7 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
               child: Stack(
                 children: [
                   InAppWebView(
-                    initialUrlRequest: URLRequest(url: WebUri("https://www.google.com")),
+                    initialUrlRequest: URLRequest(url: WebUri(widget.initialUrl)),
                     initialSettings: settings,
                     
                     initialUserScripts: UnmodifiableListView<UserScript>([
@@ -319,22 +649,59 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
                     ]),
 
                     onWebViewCreated: (controller) => webViewController = controller,
+                    onLoadStart: (controller, url) async {
+                      setState(() => _isLoading = true);
+                    },
+                    onReceivedError: (controller, request, error) async {
+                      if (error.type == WebResourceErrorType.TIMEOUT ||
+                          error.type == WebResourceErrorType.CANNOT_CONNECT_TO_HOST ||
+                          error.type == WebResourceErrorType.HOST_LOOKUP ||
+                          error.type == WebResourceErrorType.SERVER_UNREACHABLE) {
+                        final url = request.url.toString();
+                        if (url.isNotEmpty) {
+                          final query = Uri.encodeQueryComponent(Uri.tryParse(url)!.host);
+                          await controller.loadUrl(
+                            urlRequest: URLRequest(url: WebUri('https://duckduckgo.com/?q=$query&kp=-2')),
+                          );
+                        }
+                      }
+                    },
                     shouldOverrideUrlLoading: (controller, navigationAction) async {
-                      final url = navigationAction.request.url.toString();
-                      if (url.contains('google.com/search') && !url.contains('safe=')) {
-                        final separator = url.contains('?') ? '&' : '?';
-                        controller.loadUrl(
-                          urlRequest: URLRequest(url: WebUri('$url${separator}safe=off')),
-                        );
-                        return NavigationActionPolicy.CANCEL;
+                      if (!navigationAction.isForMainFrame) {
+                        return NavigationActionPolicy.ALLOW;
+                      }
+                      final uri = navigationAction.request.url;
+                      if (uri != null && uri.path.contains('/search')) {
+                        if (uri.host.contains('google.com') && uri.queryParameters['safe'] != 'off') {
+                          final newUri = uri.replace(queryParameters: {
+                            ...uri.queryParameters,
+                            'safe': 'off',
+                          });
+                          await controller.loadUrl(urlRequest: URLRequest(url: WebUri.uri(newUri)));
+                          return NavigationActionPolicy.CANCEL;
+                        }
+                        if (uri.host.contains('duckduckgo.com') && uri.queryParameters['kp'] != '-2') {
+                          final newUri = uri.replace(queryParameters: {
+                            ...uri.queryParameters,
+                            'kp': '-2',
+                          });
+                          await controller.loadUrl(urlRequest: URLRequest(url: WebUri.uri(newUri)));
+                          return NavigationActionPolicy.CANCEL;
+                        }
                       }
                       return NavigationActionPolicy.ALLOW;
                     },
-                    onLoadStop: (controller, url) async { _applyLayoutSistemDanZoomDinamis(); },
+                    onLoadStop: (controller, url) async {
+                      _applyLayoutSistemDanZoomDinamis();
+                      setState(() => _isLoading = false);
+                    },
                     onUpdateVisitedHistory: (controller, url, isReload) async {
                       _canGoBack = await controller.canGoBack();
                       _canGoForward = await controller.canGoForward();
-                      _urlController.text = url.toString();
+                      final urlStr = url.toString();
+                      _urlController.text = urlStr;
+                      final prefs = await SharedPreferences.getInstance();
+                      prefs.setString('lastUrl', urlStr);
                       setState(() {});
                     },
                     onCreateWindow: (controller, createWindowAction) async {
@@ -391,249 +758,117 @@ class _AutoRefreshPageState extends State<AutoRefreshPage> {
                     },
                   ),
 
-                  if (_isMenuTerbuka)
-                    Positioned(
-                      bottom: 80,
-                      right: 16,
-                      left: 16,
-                      child: AnimatedPadding(
-                        duration: const Duration(milliseconds: 250),
-                        curve: Curves.easeOutCubic, 
-                        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-                        child: Container(
-                          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.75),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 5))],
-                          ),
-                          child: SingleChildScrollView(
-                            physics: const ClampingScrollPhysics(),
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  Center( child: Container( width: 50, height: 4, margin: const EdgeInsets.only(bottom: 15), decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)) ) ),
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      ElevatedButton.icon(
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: Colors.blue.shade100,
-                                          foregroundColor: Colors.blue.shade900,
-                                          elevation: 0,
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))
-                                        ),
-                                        icon: Icon( (_rotationIndex == 1 || _rotationIndex == 3) ? Icons.screen_lock_landscape : Icons.screen_lock_portrait, size: 20 ),
-                                        label: Text(_teksNamaRotasi[_rotationIndex], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                                        onPressed: _gantiUrutanRotasiSistemLayar, 
-                                      ),
-                    
-                                      Container(
-                                        height: 38,
-                                        decoration: BoxDecoration( color: Colors.grey.shade50, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200) ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            IconButton( padding: EdgeInsets.zero, icon: const Icon(Icons.remove, size: 18), color: Colors.black87, onPressed: () => _changeZoomLevel(-10) ),
-                                            Container( width: 45, alignment: Alignment.center, child: Text("$_zoomValue%", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)) ),
-                                            IconButton( padding: EdgeInsets.zero, icon: const Icon(Icons.add, size: 18), color: Colors.black87, onPressed: () => _changeZoomLevel(10) ),
-                                          ],
-                                        ),
-                                      )
-                                    ],
-                                  ),
-                                  
-                                  const SizedBox(height: 12),
-                                  Container(
-                                    decoration: BoxDecoration( borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.blueGrey.shade100) ),
-                                    clipBehavior: Clip.antiAlias,
-                                    child: Material(
-                                      color: Colors.blueGrey.shade50,
-                                      child: Column(
-                                        children: [
-                                          SwitchListTile(
-                                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-                                            visualDensity: VisualDensity.compact,
-                                            activeColor: Colors.blue, 
-                                            activeTrackColor: Colors.blue.withValues(alpha: 0.3),
-                                            title: const Text("PC/Tablet Dimensi View", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.blueGrey)),
-                                            value: _isDesktopMode,
-                                            onChanged: (bool onUpdateTgl) => _toggleDesktopMode(onUpdateTgl),
-                                          ),
-                                          
-                                          if(_isDesktopMode)
-                                            Padding(
-                                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                                              child: Row(
-                                                children: [
-                                                  const Text("Atur Lebar Px Area:", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
-                                                  const SizedBox(width: 8),
-                                                  Expanded(
-                                                    child: SizedBox(
-                                                      height: 38,
-                                                      child: TextField(
-                                                        controller: _widthController,
-                                                        keyboardType: TextInputType.number,
-                                                        textAlign: TextAlign.center,
-                                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                                                        decoration: const InputDecoration(
-                                                          hintText: "Misal 800",
-                                                          contentPadding: EdgeInsets.zero,
-                                                          suffixText: "Px   ", suffixStyle: TextStyle(fontSize: 11, color: Colors.grey),
-                                                          fillColor: Colors.white, filled: true,
-                                                          border: OutlineInputBorder()
-                                                        ),
-                                                        onSubmitted: (_) { FocusScope.of(context).unfocus(); _applyLayoutSistemDanZoomDinamis(); },
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            )
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                  
-                                  const SizedBox(height: 12),
-                                  const Divider(height: 1, thickness: 1, color: Colors.black12), 
-                                  const SizedBox(height: 12),
-                    
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        flex: 1,
-                                        child: TextField(
-                                          controller: _intervalController,
-                                          keyboardType: TextInputType.number,
-                                          enabled: !_isRunning,
-                                          style: const TextStyle(fontWeight: FontWeight.bold),
-                                          decoration: InputDecoration(
-                                            labelText: "⏱️ Interval(s)",
-                                            labelStyle: const TextStyle(fontSize: 11),
-                                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                                            isDense: true,
-                                            filled: true, fillColor: _isRunning ? Colors.grey.shade200 : Colors.green.shade50,
-                                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Colors.green.shade300)),
-                                            disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Colors.grey.shade300)),
-                                            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Colors.green.shade600, width: 2)),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        flex: 1,
-                                        child: ElevatedButton(
-                                          onPressed: _isRunning ? null : () { setState(() => _isMenuTerbuka = false); _startAutoRefresh(); },
-                                          style: ElevatedButton.styleFrom(
-                                              backgroundColor: Colors.green.shade600, foregroundColor: Colors.white,
-                                              elevation: 0, padding: const EdgeInsets.symmetric(vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-                                          child: const Text("▶ RUN!", style: TextStyle(fontWeight: FontWeight.w900)),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      SizedBox(
-                                        width: 48,
-                                        child: ElevatedButton(
-                                          onPressed: _isRunning ? _stopAutoRefresh : null,
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Colors.red.shade500, foregroundColor: Colors.white,
-                                            elevation: 0, padding: EdgeInsets.zero, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))
-                                          ),
-                                          child: const Icon(Icons.stop_rounded, size: 26),
-                                        ),
-                                      ),
-                                    ],
-                                  )
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+                  ], // Stack children close
+                ), // Stack close
+              ), // Expanded close
+            ], // Column children close
+          ), // Column close
+        ), // SafeArea close
       floatingActionButton: FloatingActionButton(
         elevation: 8,
         backgroundColor: _isRunning ? Colors.green.shade500 : Colors.blue.shade700,
-        onPressed: () { setState(() { _isMenuTerbuka = !_isMenuTerbuka; }); },
+        onPressed: () {
+          if (_isMenuTerbuka) {
+            Navigator.maybePop(context);
+          } else {
+            _showSettingsSheet();
+          }
+        },
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 300),
           child: Icon(_isMenuTerbuka ? Icons.close : Icons.tune_rounded, key: ValueKey(_isMenuTerbuka), color: Colors.white),
         ),
       ),
+      ),
     );
   }
 
   Widget _buildAddressBar() {
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: Row(
-        children: [
-          IconButton(
-            icon: const Icon(Icons.arrow_back_ios, size: 16),
-            onPressed: _canGoBack ? _goBack : null,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36),
-            color: Colors.blueGrey.shade700,
-          ),
-          IconButton(
-            icon: const Icon(Icons.arrow_forward_ios, size: 16),
-            onPressed: _canGoForward ? _goForward : null,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36),
-            color: Colors.blueGrey.shade700,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh, size: 20),
-            onPressed: _refresh,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36),
-            color: Colors.blueGrey.shade700,
-          ),
-          const SizedBox(width: 4),
-          Expanded(
-            child: TextField(
-              controller: _urlController,
-              keyboardType: TextInputType.url,
-              textInputAction: TextInputAction.go,
-              style: const TextStyle(fontSize: 13, color: Colors.black87),
-              decoration: InputDecoration(
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                filled: true,
-                fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  borderSide: BorderSide.none,
+    return Material(
+      elevation: 2,
+      shadowColor: Colors.black12,
+      child: Container(
+        color: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.arrow_back_ios, size: 16),
+              onPressed: _canGoBack ? _goBack : null,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 34),
+              color: Colors.grey.shade700,
+            ),
+            IconButton(
+              icon: const Icon(Icons.arrow_forward_ios, size: 16),
+              onPressed: _canGoForward ? _goForward : null,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 34),
+              color: Colors.grey.shade700,
+            ),
+            if (_isLoading)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: SizedBox(
+                  width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
                 ),
-                hintText: "Cari atau masukkan URL",
-                hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+              )
+            else
+              IconButton(
+                icon: const Icon(Icons.refresh, size: 20),
+                onPressed: _refresh,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 34),
+                color: Colors.grey.shade700,
               ),
-              onSubmitted: (value) => _goToUrl(value),
+            const SizedBox(width: 2),
+            Expanded(
+              child: TextField(
+                controller: _urlController,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.go,
+                style: const TextStyle(fontSize: 13, color: Colors.black87),
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  filled: true,
+                  fillColor: Colors.grey.shade100,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(20),
+                    borderSide: BorderSide.none,
+                  ),
+                  hintText: "Cari atau masukkan URL",
+                  hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                  suffixIcon: _urlController.text.isNotEmpty
+                      ? IconButton(
+                          icon: Icon(Icons.close_rounded, size: 18, color: Colors.grey.shade500),
+                          onPressed: () {
+                            _urlController.clear();
+                            setState(() {});
+                          },
+                        )
+                      : null,
+                ),
+                onSubmitted: (value) => _goToUrl(value),
+                onChanged: (_) => setState(() {}),
+              ),
             ),
-          ),
-          const SizedBox(width: 4),
-          TextButton(
-            onPressed: () => _goToUrl(_urlController.text),
-            style: TextButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              foregroundColor: Colors.blue.shade700,
+            const SizedBox(width: 4),
+            TextButton(
+              onPressed: () => _goToUrl(_urlController.text),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                foregroundColor: Colors.blue.shade700,
+                backgroundColor: Colors.blue.shade50,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              ),
+              child: const Text("Go", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
             ),
-            child: const Text("Go", style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
